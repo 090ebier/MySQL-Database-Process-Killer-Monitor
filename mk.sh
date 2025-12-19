@@ -162,28 +162,89 @@ detect_panel() {
 }
 
 # ---------- MySQL setup: cPanel ----------
+# MySQL setup for cPanel (robust + no password in ps)
 setup_cpanel_mysql() {
-    if [[ ! -f /root/.my.cnf ]]; then
-        print_warning "/root/.my.cnf not found. Trying /root/my.cnf..."
-        if [[ ! -f /root/my.cnf ]]; then
-            print_error "Neither /root/.my.cnf nor /root/my.cnf found."
-            return 1
-        fi
-        MYSQL_CNF="/root/my.cnf"
+    local cnf=""
+
+    # Prefer /root/.my.cnf then /root/my.cnf, but also allow current dir .my.cnf (your case)
+    if [[ -f /root/.my.cnf ]]; then
+        cnf="/root/.my.cnf"
+    elif [[ -f /root/my.cnf ]]; then
+        cnf="/root/my.cnf"
+    elif [[ -f ./.my.cnf ]]; then
+        cnf="./.my.cnf"
+        print_warning "Using ./.my.cnf from current directory (not /root)."
     else
-        MYSQL_CNF="/root/.my.cnf"
+        print_error "No MySQL credentials file found: /root/.my.cnf or /root/my.cnf (or ./.my.cnf)."
+        return 1
     fi
 
-    MYSQL_CMD=(mysql --batch --skip-column-names --defaults-extra-file="$MYSQL_CNF")
-    MYSQL_USER="root"
+    # Read user/password from [client] section (CRLF-safe)
+    local cp_user cp_pass cp_socket
+    cp_user=$(awk '
+        BEGIN{in=0}
+        /^\[client\]/{in=1;next}
+        /^\[/{in=0}
+        in && $0 ~ /^[[:space:]]*user[[:space:]]*=/ {sub(/^[^=]*=/,""); gsub(/^[ \t"]+|[ \t"]+$/,""); print; exit}
+    ' "$cnf" 2>/dev/null | tr -d '\r' || true)
 
+    cp_pass=$(awk '
+        BEGIN{in=0}
+        /^\[client\]/{in=1;next}
+        /^\[/{in=0}
+        in && $0 ~ /^[[:space:]]*password[[:space:]]*=/ {sub(/^[^=]*=/,""); gsub(/^[ \t"]+|[ \t"]+$/,""); print; exit}
+    ' "$cnf" 2>/dev/null | tr -d '\r' || true)
+
+    cp_socket=$(awk '
+        BEGIN{in=0}
+        /^\[client\]/{in=1;next}
+        /^\[/{in=0}
+        in && $0 ~ /^[[:space:]]*socket[[:space:]]*=/ {sub(/^[^=]*=/,""); gsub(/^[ \t"]+|[ \t"]+$/,""); print; exit}
+    ' "$cnf" 2>/dev/null | tr -d '\r' || true)
+
+    [[ -z "$cp_user" ]] && cp_user="root"
+
+    if [[ -z "$cp_pass" ]]; then
+        print_error "Could not read password from $cnf ([client] password=...)"
+        return 1
+    fi
+
+    MYSQL_USER="$cp_user"
+
+    # Choose socket (prefer from cnf, otherwise common paths)
+    local sock=""
+    if [[ -n "$cp_socket" && -S "$cp_socket" ]]; then
+        sock="$cp_socket"
+    else
+        for s in /var/lib/mysql/mysql.sock /var/run/mysqld/mysqld.sock /run/mysqld/mysqld.sock /tmp/mysql.sock; do
+            [[ -S "$s" ]] && { sock="$s"; break; }
+        done
+    fi
+
+    if ! command -v mysql >/dev/null 2>&1; then
+        print_error "mysql client not found in PATH"
+        return 1
+    fi
+
+    # Build command (no password in ps). Force socket protocol if socket exists.
+    if [[ -n "$sock" ]]; then
+        MYSQL_CMD=(env MYSQL_PWD="$cp_pass" mysql --protocol=SOCKET -u"$cp_user" -S"$sock" --batch --skip-column-names)
+    else
+        MYSQL_CMD=(env MYSQL_PWD="$cp_pass" mysql -u"$cp_user" --batch --skip-column-names)
+    fi
+
+    # Test connection
     if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
         print_error "Failed to connect to MySQL with cPanel credentials"
+        print_info "Tried cnf: $cnf"
+        print_info "Detected user: $cp_user"
+        print_info "Detected socket: ${sock:-<none>}"
         return 1
     fi
 
     return 0
 }
+
 
 # ---------- MySQL setup: DirectAdmin ----------
 # DirectAdmin MySQL setup (secure-ish, keeps legacy behavior, no password in ps)
