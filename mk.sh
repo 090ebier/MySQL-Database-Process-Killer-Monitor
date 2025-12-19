@@ -186,7 +186,7 @@ setup_cpanel_mysql() {
 }
 
 # ---------- MySQL setup: DirectAdmin ----------
-# MySQL/MariaDB setup for DirectAdmin (handles host empty, port=0, prefers socket)
+# DirectAdmin MySQL setup (secure: no password in ps; still socket-first like legacy)
 setup_da_mysql() {
     local da_conf="/usr/local/directadmin/conf/mysql.conf"
 
@@ -195,72 +195,51 @@ setup_da_mysql() {
         return 1
     fi
 
-    # Read values; strip CRLF and trim
-    local da_user da_pass da_socket da_host da_port
+    local da_user da_pass da_socket
     da_user=$(awk -F= '$1 ~ /^user$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' "$da_conf" 2>/dev/null | tr -d '\r' || true)
     da_pass=$(awk -F= '$1 ~ /^(passwd|password)$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' "$da_conf" 2>/dev/null | tr -d '\r' || true)
     da_socket=$(awk -F= '$1 ~ /^socket$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' "$da_conf" 2>/dev/null | tr -d '\r' || true)
-    da_host=$(awk -F= '$1 ~ /^host$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' "$da_conf" 2>/dev/null | tr -d '\r' || true)
-    da_port=$(awk -F= '$1 ~ /^port$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' "$da_conf" 2>/dev/null | tr -d '\r' || true)
 
     [[ -z "$da_user" ]] && da_user="da_admin"
 
     if [[ -z "$da_pass" ]]; then
-        print_error "Could not read MySQL password from $da_conf (expected passwd= or password=)"
+        print_error "Could not read MySQL password from $da_conf"
         return 1
     fi
 
-    # Pick client binary (MariaDB installs may deprecate mysql)
-    local MYSQL_BIN="mysql"
-    if command -v mariadb >/dev/null 2>&1; then
-        MYSQL_BIN="mariadb"
+    # Use mysql client (legacy behavior)
+    if ! command -v mysql >/dev/null 2>&1; then
+        print_error "mysql client not found in PATH"
+        return 1
     fi
 
-    # Create temp cnf
+    MYSQL_USER="$da_user"
+
+    # Create a secure temporary defaults file (password will NOT appear in ps)
     TMP_CNF=$(mktemp /tmp/mysql_killer.XXXXXX.cnf)
     chmod 600 "$TMP_CNF" 2>/dev/null || true
 
-    # Build cnf safely:
-    # - If host is empty, do NOT write host -> socket connection will work
-    # - If port is empty or 0, do NOT write port
-    # - If socket exists, write it (preferred for local)
     {
         echo "[client]"
         echo "user=$da_user"
         echo "password=$da_pass"
-
-        # Only set host if non-empty (avoids forcing TCP when host is blank)
-        if [[ -n "$da_host" ]]; then
-            echo "host=$da_host"
-        fi
-
-        # Only set port if valid and not zero
-        if [[ -n "$da_port" && "$da_port" != "0" ]]; then
-            echo "port=$da_port"
-        fi
-
-        # Prefer socket if provided and exists
         if [[ -n "$da_socket" && -S "$da_socket" ]]; then
             echo "socket=$da_socket"
         fi
     } > "$TMP_CNF"
 
-    MYSQL_CMD=("$MYSQL_BIN" --batch --skip-column-names --defaults-extra-file="$TMP_CNF")
-    MYSQL_USER="$da_user"
+    MYSQL_CMD=(mysql --batch --skip-column-names --defaults-extra-file="$TMP_CNF")
 
     # Test connection
     if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
-        print_error "Failed to connect to MySQL/MariaDB with DirectAdmin credentials"
-        print_info "Debug hints:"
-        print_info "  - socket from mysql.conf: ${da_socket:-<empty>} (exists? $([[ -S "${da_socket:-/dev/null}" ]] && echo yes || echo no))"
-        print_info "  - host from mysql.conf: ${da_host:-<empty>}"
-        print_info "  - port from mysql.conf: ${da_port:-<empty>} (ignored if 0/empty)"
-        print_info "  - client binary: $MYSQL_BIN"
+        print_error "Failed to connect to MySQL with DirectAdmin credentials"
+        print_info "Tried socket: ${da_socket:-<empty>}"
         return 1
     fi
 
     return 0
 }
+
 # ---------- Monitoring: TOP databases ----------
 show_top_databases_by_queries() {
     print_header "TOP Databases by Active Query Count"
