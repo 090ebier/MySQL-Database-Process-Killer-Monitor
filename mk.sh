@@ -162,7 +162,7 @@ detect_panel() {
 }
 
 # ---------- MySQL setup: cPanel ----------
-# cPanel MySQL setup (do NOT parse password; rely on /root/.my.cnf directly)
+# cPanel MySQL setup (reliable: rely on /root/.my.cnf, no parsing)
 setup_cpanel_mysql() {
     local cnf=""
 
@@ -175,15 +175,13 @@ setup_cpanel_mysql() {
         return 1
     fi
 
-    # Use mysql client; force it to read ONLY this file (more reliable on cPanel)
+    # Use ONLY this cnf (exactly like your manual test)
     MYSQL_CMD=(mysql --batch --skip-column-names --defaults-file="$cnf")
     MYSQL_USER="root"
 
-    # Test connection
     if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
-        print_error "Failed to connect to MySQL with cPanel credentials using $cnf"
-        print_info "Try manual test:"
-        print_info "  mysql --defaults-file=$cnf -e 'SELECT 1;'"
+        print_error "Failed to connect to MySQL with cPanel credentials"
+        print_info "Manual test passed earlier, so check for accidental alias/wrapper of mysql in script runtime."
         return 1
     fi
 
