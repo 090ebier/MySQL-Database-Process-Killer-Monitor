@@ -108,7 +108,7 @@ detect_panel() {
 
 # ---------- MySQL setup (Requested syntax: --defaults-file=...) ----------
 setup_cpanel_mysql() {
-    # cPanel default credentials file
+    # Pick credentials file
     if [[ -f /root/.my.cnf ]]; then
         MYSQL_CNF="/root/.my.cnf"
     elif [[ -f /root/my.cnf ]]; then
@@ -119,14 +119,17 @@ setup_cpanel_mysql() {
         return 1
     fi
 
+    # Tight perms (best practice; avoids warnings/risk)
+    chmod 600 "$MYSQL_CNF" 2>/dev/null || true
+
     MYSQL_USER="root"
 
-    # Requested syntax
-    MYSQL_CMD=(mysql --batch --skip-column-names --defaults-file="$MYSQL_CNF")
+    # IMPORTANT: defaults-file must be first after mysql
+    MYSQL_CMD=(mysql --defaults-file="$MYSQL_CNF" --batch --skip-column-names)
 
-    # Test connection (fallback to defaults-extra-file if needed)
+    # Test (fallback to defaults-extra-file, also placed first after mysql)
     if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
-        MYSQL_CMD=(mysql --batch --skip-column-names --defaults-extra-file="$MYSQL_CNF")
+        MYSQL_CMD=(mysql --defaults-extra-file="$MYSQL_CNF" --batch --skip-column-names)
         if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
             print_error "Failed to connect to MySQL with cPanel credentials file: $MYSQL_CNF"
             return 1
@@ -137,22 +140,24 @@ setup_cpanel_mysql() {
 }
 
 setup_da_mysql() {
-    # DirectAdmin default credentials file
     MYSQL_CNF="/usr/local/directadmin/conf/my.cnf"
     if [[ ! -f "$MYSQL_CNF" ]]; then
         print_error "DirectAdmin MySQL credentials file not found: $MYSQL_CNF"
         return 1
     fi
 
-    # In many DA setups, this file is for root/admin access.
+    # Tight perms (best practice; avoids warnings/risk)
+    chmod 600 "$MYSQL_CNF" 2>/dev/null || true
+
+    # Most DA setups use root/admin creds in this file (if [client] exists)
     MYSQL_USER="root"
 
-    # Requested syntax
-    MYSQL_CMD=(mysql --batch --skip-column-names --defaults-file="$MYSQL_CNF")
+    # IMPORTANT: defaults-file must be first after mysql
+    MYSQL_CMD=(mysql --defaults-file="$MYSQL_CNF" --batch --skip-column-names)
 
-    # Test connection (fallback to defaults-extra-file if needed)
+    # Test (fallback to defaults-extra-file, also placed first after mysql)
     if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
-        MYSQL_CMD=(mysql --batch --skip-column-names --defaults-extra-file="$MYSQL_CNF")
+        MYSQL_CMD=(mysql --defaults-extra-file="$MYSQL_CNF" --batch --skip-column-names)
         if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
             print_error "Failed to connect to MySQL with DirectAdmin credentials file: $MYSQL_CNF"
             return 1
