@@ -186,7 +186,7 @@ setup_cpanel_mysql() {
 }
 
 # ---------- MySQL setup: DirectAdmin ----------
-# MySQL setup for DirectAdmin (robust: prefers socket for local host, CRLF-safe, socket fallback)
+# MySQL/MariaDB setup for DirectAdmin (handles host empty, port=0, prefers socket)
 setup_da_mysql() {
     local da_conf="/usr/local/directadmin/conf/mysql.conf"
 
@@ -195,7 +195,7 @@ setup_da_mysql() {
         return 1
     fi
 
-    # Read values and strip CRLF (\r) + trim spaces
+    # Read values; strip CRLF and trim
     local da_user da_pass da_socket da_host da_port
     da_user=$(awk -F= '$1 ~ /^user$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' "$da_conf" 2>/dev/null | tr -d '\r' || true)
     da_pass=$(awk -F= '$1 ~ /^(passwd|password)$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' "$da_conf" 2>/dev/null | tr -d '\r' || true)
@@ -204,97 +204,63 @@ setup_da_mysql() {
     da_port=$(awk -F= '$1 ~ /^port$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' "$da_conf" 2>/dev/null | tr -d '\r' || true)
 
     [[ -z "$da_user" ]] && da_user="da_admin"
+
     if [[ -z "$da_pass" ]]; then
         print_error "Could not read MySQL password from $da_conf (expected passwd= or password=)"
         return 1
     fi
 
-    # Decide if host is "local"
-    local is_local_host=1
-    if [[ -n "$da_host" ]]; then
-        case "$da_host" in
-            localhost|127.0.0.1|::1) is_local_host=0 ;;  # local
-            *) is_local_host=1 ;;                          # remote
-        esac
-    else
-        is_local_host=0  # no host specified -> treat as local
+    # Pick client binary (MariaDB installs may deprecate mysql)
+    local MYSQL_BIN="mysql"
+    if command -v mariadb >/dev/null 2>&1; then
+        MYSQL_BIN="mariadb"
     fi
 
-    # Socket candidates (prefer config socket if valid)
-    local -a socket_candidates=()
-    if [[ -n "$da_socket" ]]; then
-        socket_candidates+=("$da_socket")
-    fi
-    socket_candidates+=(
-        "/run/mysqld/mysqld.sock"
-        "/var/run/mysqld/mysqld.sock"
-        "/var/lib/mysql/mysql.sock"
-        "/var/run/mysql/mysql.sock"
-        "/tmp/mysql.sock"
-    )
-
-    # Create temporary defaults file
+    # Create temp cnf
     TMP_CNF=$(mktemp /tmp/mysql_killer.XXXXXX.cnf)
     chmod 600 "$TMP_CNF" 2>/dev/null || true
 
-    MYSQL_USER="$da_user"
-
-    # 1) If local host (or host empty), try socket first (most reliable on DA boxes)
-    if [[ "$is_local_host" -eq 0 ]]; then
-        local sock=""
-        for s in "${socket_candidates[@]}"; do
-            if [[ -S "$s" ]]; then
-                sock="$s"
-                break
-            fi
-        done
-
-        if [[ -n "$sock" ]]; then
-            {
-                echo "[client]"
-                echo "user=$da_user"
-                echo "password=$da_pass"
-                echo "socket=$sock"
-            } > "$TMP_CNF"
-
-            MYSQL_CMD=(mysql --batch --skip-column-names --defaults-extra-file="$TMP_CNF")
-            if "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
-                log_action "INFO" "DirectAdmin MySQL connected via socket: $sock"
-                return 0
-            fi
-            # If socket attempt failed, fall through to TCP attempt below
-            log_action "WARNING" "Socket connect failed (sock=$sock). Falling back to TCP..."
-        fi
-    fi
-
-    # 2) TCP mode (remote host or socket not found/failed)
-    # If host empty but we got here, default to localhost
-    [[ -z "$da_host" ]] && da_host="localhost"
-
+    # Build cnf safely:
+    # - If host is empty, do NOT write host -> socket connection will work
+    # - If port is empty or 0, do NOT write port
+    # - If socket exists, write it (preferred for local)
     {
         echo "[client]"
         echo "user=$da_user"
         echo "password=$da_pass"
-        echo "host=$da_host"
-        [[ -n "$da_port" ]] && echo "port=$da_port"
+
+        # Only set host if non-empty (avoids forcing TCP when host is blank)
+        if [[ -n "$da_host" ]]; then
+            echo "host=$da_host"
+        fi
+
+        # Only set port if valid and not zero
+        if [[ -n "$da_port" && "$da_port" != "0" ]]; then
+            echo "port=$da_port"
+        fi
+
+        # Prefer socket if provided and exists
+        if [[ -n "$da_socket" && -S "$da_socket" ]]; then
+            echo "socket=$da_socket"
+        fi
     } > "$TMP_CNF"
 
-    MYSQL_CMD=(mysql --batch --skip-column-names --defaults-extra-file="$TMP_CNF")
+    MYSQL_CMD=("$MYSQL_BIN" --batch --skip-column-names --defaults-extra-file="$TMP_CNF")
+    MYSQL_USER="$da_user"
 
+    # Test connection
     if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
-        print_error "Failed to connect to MySQL with DirectAdmin credentials"
-        print_info "Hints:"
-        print_info "  - Check if MySQL is socket-only (skip-networking). If yes, ensure socket path exists."
-        print_info "  - Check for CRLF in mysql.conf (we strip \\r, but verify file integrity)."
-        print_info "  - Review: $da_conf (host/port/socket/user/passwd)"
+        print_error "Failed to connect to MySQL/MariaDB with DirectAdmin credentials"
+        print_info "Debug hints:"
+        print_info "  - socket from mysql.conf: ${da_socket:-<empty>} (exists? $([[ -S "${da_socket:-/dev/null}" ]] && echo yes || echo no))"
+        print_info "  - host from mysql.conf: ${da_host:-<empty>}"
+        print_info "  - port from mysql.conf: ${da_port:-<empty>} (ignored if 0/empty)"
+        print_info "  - client binary: $MYSQL_BIN"
         return 1
     fi
 
-    log_action "INFO" "DirectAdmin MySQL connected via TCP: host=$da_host port=${da_port:-default}"
     return 0
 }
-
-
 # ---------- Monitoring: TOP databases ----------
 show_top_databases_by_queries() {
     print_header "TOP Databases by Active Query Count"
