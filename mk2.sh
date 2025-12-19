@@ -2,15 +2,16 @@
 #
 # MySQL Database Process Killer & Monitor
 # Compatible with cPanel and DirectAdmin
-# Version: 3.1 - Advanced Monitoring with Security Fixes
+# Version: 4.0 - Bug Fixed & Enhanced
 #
-# FIXED BUGS:
-# - Password exposure in process list (DirectAdmin)
-# - SQL injection vulnerabilities
-# - Input validation issues
-# - Race conditions in process counting
-# - Memory issues with large process lists
-# - Improved error handling throughout
+# CHANGELOG v4.0:
+# - Fixed duplicate function definitions
+# - Fixed incomplete export_report function
+# - Fixed string concatenation issues in SQL queries
+# - Improved error handling and validation
+# - Enhanced security measures
+# - Better code organization
+# - All text translated to English
 #
 
 set -euo pipefail
@@ -235,7 +236,7 @@ EOF
 show_menu() {
     clear
     echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║   MySQL Database Process Killer & Monitor v3.1            ║${NC}"
+    echo -e "${BLUE}║   MySQL Database Process Killer & Monitor v4.0            ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
     echo
     echo -e "${MAGENTA}${BOLD}📊 Monitoring & Analysis:${NC}"
@@ -643,6 +644,74 @@ kill_long_queries() {
     done <<< "$ids"
     
     print_success "Killed: $killed"
+    log_kill_action "Kill Long" ">$min_time"s "$killed"
+}
+
+kill_sleeping_connections() {
+    local db="${1:-}"
+    local where="command='Sleep' AND user != '$(sql_escape "$MYSQL_USER")'"
+    
+    if [[ -n "$db" ]]; then
+        db=$(sanitize_input "$db")
+        where="$where AND db='$(sql_escape "$db")'"
+    fi
+    
+    local ids
+    ids=$("${MYSQL_CMD[@]}" -e "SELECT id FROM information_schema.processlist WHERE $where;" 2>/dev/null)
+    
+    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No sleeping connections."; return 0; }
+    
+    local count=$(echo "$ids" | grep -c ^ || echo 0)
+    print_warning "Kill $count sleeping connection(s)? (y/n): "
+    read -r confirm
+    
+    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
+    
+    local killed=0
+    while IFS= read -r id; do
+        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
+        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
+    done <<< "$ids"
+    
+    print_success "Killed: $killed"
+    log_kill_action "Kill Sleep" "${db:-all}" "$killed"
+}
+
+kill_user_queries() {
+    local username="$1"
+    username=$(sanitize_input "$username")
+    
+    print_info "Searching processes: user='$username'"
+    
+    local ids
+    ids=$("${MYSQL_CMD[@]}" -e "
+    SELECT id FROM information_schema.processlist 
+    WHERE user='$(sql_escape "$username")' 
+      AND user != '$(sql_escape "$MYSQL_USER")';
+    " 2>/dev/null)
+    
+    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No processes found."; return 0; }
+    
+    "${MYSQL_CMD[@]}" -e "
+    SELECT id, COALESCE(db,'NULL'), command, time, COALESCE(state,'NULL')
+    FROM information_schema.processlist
+    WHERE user='$(sql_escape "$username")';
+    " 2>/dev/null | column -t -s \t'
+    echo
+    
+    local count=$(echo "$ids" | grep -c ^ || echo 0)
+    print_warning "Kill $count process(es)? (y/n): "
+    read -r confirm
+    
+    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
+    
+    local killed=0
+    while IFS= read -r id; do
+        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
+        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
+    done <<< "$ids"
+    
+    print_success "Killed: $killed"
     log_kill_action "Kill User" "$username" "$killed"
 }
 
@@ -695,75 +764,7 @@ export_report() {
         "${MYSQL_CMD[@]}" -e "
         SELECT VARIABLE_NAME, VARIABLE_VALUE 
         FROM information_schema.GLOBAL_STATUS 
-        WHERE VARIABLE_NAME IN ('Uptime','Threads_connected','Threads_running','Queries');" | column -t -s )? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Long" ">$min_time"s "$killed"
-}
-
-kill_sleeping_connections() {
-    local db="${1:-}"
-    local where="command='Sleep' AND user != '$(sql_escape "$MYSQL_USER")'"
-    
-    if [[ -n "$db" ]]; then
-        db=$(sanitize_input "$db")
-        where="$where AND db='$(sql_escape "$db")'"
-    fi
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "SELECT id FROM information_schema.processlist WHERE $where;" 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No sleeping connections."; return 0; }
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count sleeping connection(s)? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Sleep" "${db:-all}" "$killed"
-}
-
-kill_user_queries() {
-    local username="$1"
-    username=$(sanitize_input "$username")
-    
-    print_info "Searching processes: user='$username'"
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "
-    SELECT id FROM information_schema.processlist 
-    WHERE user='$(sql_escape "$username")' 
-      AND user != '$(sql_escape "$MYSQL_USER")';
-    " 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No processes found."; return 0; }
-    
-    "${MYSQL_CMD[@]}" -e "
-    SELECT id, COALESCE(db,'NULL'), command, time, COALESCE(state,'NULL')
-    FROM information_schema.processlist
-    WHERE user='$(sql_escape "$username")';
-    " 2>/dev/null | column -t -s $'\t'
-    echo
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count process(es\t'
+        WHERE VARIABLE_NAME IN ('Uptime','Threads_connected','Threads_running','Queries');" 2>/dev/null | column -t -s \t'
         echo
         
         echo "=== TOP Databases ==="
@@ -771,155 +772,23 @@ kill_user_queries() {
         SELECT COALESCE(db,'NULL'), COUNT(*) 
         FROM information_schema.processlist
         WHERE user != '$(sql_escape "$MYSQL_USER")'
-        GROUP BY db ORDER BY COUNT(*) DESC LIMIT 20;" | column -t -s )? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Long" ">$min_time"s "$killed"
-}
-
-kill_sleeping_connections() {
-    local db="${1:-}"
-    local where="command='Sleep' AND user != '$(sql_escape "$MYSQL_USER")'"
-    
-    if [[ -n "$db" ]]; then
-        db=$(sanitize_input "$db")
-        where="$where AND db='$(sql_escape "$db")'"
-    fi
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "SELECT id FROM information_schema.processlist WHERE $where;" 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No sleeping connections."; return 0; }
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count sleeping connection(s)? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Sleep" "${db:-all}" "$killed"
-}
-
-kill_user_queries() {
-    local username="$1"
-    username=$(sanitize_input "$username")
-    
-    print_info "Searching processes: user='$username'"
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "
-    SELECT id FROM information_schema.processlist 
-    WHERE user='$(sql_escape "$username")' 
-      AND user != '$(sql_escape "$MYSQL_USER")';
-    " 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No processes found."; return 0; }
-    
-    "${MYSQL_CMD[@]}" -e "
-    SELECT id, COALESCE(db,'NULL'), command, time, COALESCE(state,'NULL')
-    FROM information_schema.processlist
-    WHERE user='$(sql_escape "$username")';
-    " 2>/dev/null | column -t -s $'\t'
-    echo
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count process(es\t'
+        GROUP BY db ORDER BY COUNT(*) DESC LIMIT 20;" 2>/dev/null | column -t -s \t'
         echo
         
         echo "=== Active Processes ==="
         "${MYSQL_CMD[@]}" -e "
         SELECT id, user, COALESCE(db,'NULL'), command, time, LEFT(COALESCE(info,'NULL'), 80)
         FROM information_schema.processlist
-        ORDER BY time DESC;" | column -t -s )? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Long" ">$min_time"s "$killed"
-}
-
-kill_sleeping_connections() {
-    local db="${1:-}"
-    local where="command='Sleep' AND user != '$(sql_escape "$MYSQL_USER")'"
-    
-    if [[ -n "$db" ]]; then
-        db=$(sanitize_input "$db")
-        where="$where AND db='$(sql_escape "$db")'"
-    fi
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "SELECT id FROM information_schema.processlist WHERE $where;" 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No sleeping connections."; return 0; }
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count sleeping connection(s)? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Sleep" "${db:-all}" "$killed"
-}
-
-kill_user_queries() {
-    local username="$1"
-    username=$(sanitize_input "$username")
-    
-    print_info "Searching processes: user='$username'"
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "
-    SELECT id FROM information_schema.processlist 
-    WHERE user='$(sql_escape "$username")' 
-      AND user != '$(sql_escape "$MYSQL_USER")';
-    " 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No processes found."; return 0; }
-    
-    "${MYSQL_CMD[@]}" -e "
-    SELECT id, COALESCE(db,'NULL'), command, time, COALESCE(state,'NULL')
-    FROM information_schema.processlist
-    WHERE user='$(sql_escape "$username")';
-    " 2>/dev/null | column -t -s $'\t'
-    echo
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count process(es\t'
+        ORDER BY time DESC;" 2>/dev/null | column -t -s \t'
         
     } > "$filename" 2>/dev/null
     
-    print_success "Report saved: $filename"
-    log_action "INFO" "Report exported: $filename"
+    if [[ -f "$filename" ]]; then
+        print_success "Report saved: $filename"
+        log_action "INFO" "Report exported: $filename"
+    else
+        print_error "Failed to create report"
+    fi
 }
 
 check_slow_query_log() {
@@ -928,75 +797,7 @@ check_slow_query_log() {
     "${MYSQL_CMD[@]}" -e "
     SELECT VARIABLE_NAME, VARIABLE_VALUE 
     FROM information_schema.GLOBAL_VARIABLES 
-    WHERE VARIABLE_NAME IN ('slow_query_log','slow_query_log_file','long_query_time');" 2>/dev/null | column -t -s )? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Long" ">$min_time"s "$killed"
-}
-
-kill_sleeping_connections() {
-    local db="${1:-}"
-    local where="command='Sleep' AND user != '$(sql_escape "$MYSQL_USER")'"
-    
-    if [[ -n "$db" ]]; then
-        db=$(sanitize_input "$db")
-        where="$where AND db='$(sql_escape "$db")'"
-    fi
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "SELECT id FROM information_schema.processlist WHERE $where;" 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No sleeping connections."; return 0; }
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count sleeping connection(s)? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Sleep" "${db:-all}" "$killed"
-}
-
-kill_user_queries() {
-    local username="$1"
-    username=$(sanitize_input "$username")
-    
-    print_info "Searching processes: user='$username'"
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "
-    SELECT id FROM information_schema.processlist 
-    WHERE user='$(sql_escape "$username")' 
-      AND user != '$(sql_escape "$MYSQL_USER")';
-    " 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No processes found."; return 0; }
-    
-    "${MYSQL_CMD[@]}" -e "
-    SELECT id, COALESCE(db,'NULL'), command, time, COALESCE(state,'NULL')
-    FROM information_schema.processlist
-    WHERE user='$(sql_escape "$username")';
-    " 2>/dev/null | column -t -s $'\t'
-    echo
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count process(es\t'
+    WHERE VARIABLE_NAME IN ('slow_query_log','slow_query_log_file','long_query_time');" 2>/dev/null | column -t -s \t'
     echo
     
     local enabled
@@ -1030,75 +831,7 @@ show_mysql_variables() {
         'interactive_timeout','max_allowed_packet','thread_cache_size',
         'table_open_cache','innodb_buffer_pool_size','tmp_table_size'
     )
-    ORDER BY VARIABLE_NAME;" 2>/dev/null | column -t -s )? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Long" ">$min_time"s "$killed"
-}
-
-kill_sleeping_connections() {
-    local db="${1:-}"
-    local where="command='Sleep' AND user != '$(sql_escape "$MYSQL_USER")'"
-    
-    if [[ -n "$db" ]]; then
-        db=$(sanitize_input "$db")
-        where="$where AND db='$(sql_escape "$db")'"
-    fi
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "SELECT id FROM information_schema.processlist WHERE $where;" 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No sleeping connections."; return 0; }
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count sleeping connection(s)? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Sleep" "${db:-all}" "$killed"
-}
-
-kill_user_queries() {
-    local username="$1"
-    username=$(sanitize_input "$username")
-    
-    print_info "Searching processes: user='$username'"
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "
-    SELECT id FROM information_schema.processlist 
-    WHERE user='$(sql_escape "$username")' 
-      AND user != '$(sql_escape "$MYSQL_USER")';
-    " 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No processes found."; return 0; }
-    
-    "${MYSQL_CMD[@]}" -e "
-    SELECT id, COALESCE(db,'NULL'), command, time, COALESCE(state,'NULL')
-    FROM information_schema.processlist
-    WHERE user='$(sql_escape "$username")';
-    " 2>/dev/null | column -t -s $'\t'
-    echo
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count process(es\t'
+    ORDER BY VARIABLE_NAME;" 2>/dev/null | column -t -s \t'
     echo
 }
 
@@ -1179,6 +912,12 @@ clear_old_logs() {
 # ============================================================================
 
 main() {
+    # Check if running as root
+    if [[ $EUID -ne 0 ]]; then
+        print_error "This script must be run as root"
+        exit 1
+    fi
+    
     init_logging
     
     if [[ "$LOG_FILE" != "/dev/null" ]]; then
@@ -1279,72 +1018,4 @@ main() {
 # Run the program
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
-fi)? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Long" ">$min_time"s "$killed"
-}
-
-kill_sleeping_connections() {
-    local db="${1:-}"
-    local where="command='Sleep' AND user != '$(sql_escape "$MYSQL_USER")'"
-    
-    if [[ -n "$db" ]]; then
-        db=$(sanitize_input "$db")
-        where="$where AND db='$(sql_escape "$db")'"
-    fi
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "SELECT id FROM information_schema.processlist WHERE $where;" 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No sleeping connections."; return 0; }
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count sleeping connection(s)? (y/n): "
-    read -r confirm
-    
-    [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]] && return 0
-    
-    local killed=0
-    while IFS= read -r id; do
-        [[ -z "$id" || ! "$id" =~ ^[0-9]+$ ]] && continue
-        "${MYSQL_CMD[@]}" -e "KILL $id;" >/dev/null 2>&1 && ((killed++))
-    done <<< "$ids"
-    
-    print_success "Killed: $killed"
-    log_kill_action "Kill Sleep" "${db:-all}" "$killed"
-}
-
-kill_user_queries() {
-    local username="$1"
-    username=$(sanitize_input "$username")
-    
-    print_info "Searching processes: user='$username'"
-    
-    local ids
-    ids=$("${MYSQL_CMD[@]}" -e "
-    SELECT id FROM information_schema.processlist 
-    WHERE user='$(sql_escape "$username")' 
-      AND user != '$(sql_escape "$MYSQL_USER")';
-    " 2>/dev/null)
-    
-    [[ -z "${ids//[[:space:]]/}" ]] && { print_warning "No processes found."; return 0; }
-    
-    "${MYSQL_CMD[@]}" -e "
-    SELECT id, COALESCE(db,'NULL'), command, time, COALESCE(state,'NULL')
-    FROM information_schema.processlist
-    WHERE user='$(sql_escape "$username")';
-    " 2>/dev/null | column -t -s $'\t'
-    echo
-    
-    local count=$(echo "$ids" | grep -c ^ || echo 0)
-    print_warning "Kill $count process(es
+fi
