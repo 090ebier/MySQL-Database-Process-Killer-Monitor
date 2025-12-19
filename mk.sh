@@ -186,7 +186,7 @@ setup_cpanel_mysql() {
 }
 
 # ---------- MySQL setup: DirectAdmin ----------
-# DirectAdmin MySQL setup (secure: no password in ps; still socket-first like legacy)
+# DirectAdmin MySQL setup (secure-ish, keeps legacy behavior, no password in ps)
 setup_da_mysql() {
     local da_conf="/usr/local/directadmin/conf/mysql.conf"
 
@@ -207,7 +207,6 @@ setup_da_mysql() {
         return 1
     fi
 
-    # Use mysql client (legacy behavior)
     if ! command -v mysql >/dev/null 2>&1; then
         print_error "mysql client not found in PATH"
         return 1
@@ -215,20 +214,13 @@ setup_da_mysql() {
 
     MYSQL_USER="$da_user"
 
-    # Create a secure temporary defaults file (password will NOT appear in ps)
-    TMP_CNF=$(mktemp /tmp/mysql_killer.XXXXXX.cnf)
-    chmod 600 "$TMP_CNF" 2>/dev/null || true
-
-    {
-        echo "[client]"
-        echo "user=$da_user"
-        echo "password=$da_pass"
-        if [[ -n "$da_socket" && -S "$da_socket" ]]; then
-            echo "socket=$da_socket"
-        fi
-    } > "$TMP_CNF"
-
-    MYSQL_CMD=(mysql --batch --skip-column-names --defaults-extra-file="$TMP_CNF")
+    # Force SOCKET protocol and socket path (legacy behavior)
+    if [[ -n "$da_socket" && -S "$da_socket" ]]; then
+        MYSQL_CMD=(env MYSQL_PWD="$da_pass" mysql --protocol=SOCKET -u"$da_user" -S"$da_socket" --batch --skip-column-names)
+    else
+        # Fallback (less ideal): no socket found
+        MYSQL_CMD=(env MYSQL_PWD="$da_pass" mysql -u"$da_user" --batch --skip-column-names)
+    fi
 
     # Test connection
     if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
@@ -239,6 +231,7 @@ setup_da_mysql() {
 
     return 0
 }
+
 
 # ---------- Monitoring: TOP databases ----------
 show_top_databases_by_queries() {
