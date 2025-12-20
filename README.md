@@ -128,14 +128,3 @@ Use carefully on production servers:
 
 You are responsible for how you use this tool.
 
----
-
-
-
-اگر دوست داری، می‌تونم همین README رو با:
-- اسکرین‌شات/نمونه خروجی (`TOP databases`, `real-time monitor`)
-- بخش Troubleshooting (مثل “چرا Query نمی‌بینم؟ command=Sleep / permission / user filter”)
-- و Badgeها (License, Bash, MariaDB)
-
-هم کامل‌تر کنم.
-```
