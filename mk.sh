@@ -204,13 +204,99 @@ show_menu() {
 }
 
 # Print table with column if available
+# Print table with adaptive width (auto-fit to terminal) + safe truncation
 print_table() {
-    if need_cmd column; then
-        column -t -s $'\t'
-    else
+    # If not interactive, just print raw
+    if [[ ! -t 1 ]]; then
         cat
+        return 0
     fi
+
+    local term_cols=120
+    if command -v tput >/dev/null 2>&1; then
+        term_cols=$(tput cols 2>/dev/null || echo 120)
+    fi
+    # sane fallback
+    [[ -z "${term_cols//[[:space:]]/}" ]] && term_cols=120
+    (( term_cols < 60 )) && term_cols=60
+
+    # We expect TAB-separated input (mysql --batch)
+    # This awk will:
+    # - compute per-column max widths
+    # - shrink columns if total exceeds terminal width
+    # - print aligned with " | "
+    # - truncate long cells with "…"
+    awk -v W="$term_cols" -v FS='\t' '
+        function len(s){ return length(s) }
+
+        function trunc(s, w,    l) {
+            l = len(s)
+            if (w <= 0) return ""
+            if (l <= w) return s
+            if (w == 1) return "…"
+            return substr(s, 1, w-1) "…"
+        }
+
+        {
+            # store all rows
+            rowc++
+            for (i=1; i<=NF; i++) {
+                cell[rowc, i] = $i
+                if (len($i) > maxw[i]) maxw[i] = len($i)
+                if (i > colc) colc = i
+            }
+            nfc[rowc] = NF
+        }
+
+        END {
+            if (rowc == 0) exit
+
+            sep = " | "
+            seplen = len(sep)
+
+            # initial widths = max widths, but clamp absurdly large ones
+            for (i=1; i<=colc; i++) {
+                w[i] = maxw[i]
+                if (w[i] > 80) w[i] = 80
+                if (w[i] < 4)  w[i] = 4
+            }
+
+            # compute total width needed
+            total = 0
+            for (i=1; i<=colc; i++) total += w[i]
+            total += (colc-1) * seplen
+
+            # if too wide, shrink widest columns down to minw
+            minw = 6
+            if (W < 60) minw = 4
+
+            while (total > W) {
+                # find widest column
+                wi = 1
+                for (i=2; i<=colc; i++) if (w[i] > w[wi]) wi = i
+
+                if (w[wi] <= minw) break
+                w[wi]--
+                total--
+            }
+
+            # print
+            for (r=1; r<=rowc; r++) {
+                # some rows might have fewer fields
+                for (i=1; i<=colc; i++) {
+                    s = cell[r,i]
+                    if (i > nfc[r]) s = ""
+                    s = trunc(s, w[i])
+                    # left pad
+                    printf "%-*s", w[i], s
+                    if (i < colc) printf "%s", sep
+                }
+                printf "\n"
+            }
+        }
+    '
 }
+
 
 # ---------- Monitoring ----------
 show_top_databases_by_queries() {
