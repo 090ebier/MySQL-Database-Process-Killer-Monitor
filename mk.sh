@@ -5,7 +5,7 @@
 # Version: 3.1 - Bugfix + Hardening + English
 #
 
-set -euo pipefail
+set -uo pipefail
 
 # ---------- Colors ----------
 RED='\033[0;31m'
@@ -105,6 +105,7 @@ detect_panel() {
     echo "$panel"
 }
 
+
 # ---------- MySQL setup (Requested syntax: --defaults-file=...) ----------
 setup_cpanel_mysql() {
     # Pick credentials file
@@ -165,6 +166,7 @@ setup_da_mysql() {
 
     return 0
 }
+    
 
 # ---------- UI ----------
 show_menu() {
@@ -201,287 +203,164 @@ show_menu() {
     echo
 }
 
-# ---------- Adaptive display helpers (DISPLAY-ONLY) ----------
-term_cols() {
-    local c=120
-    if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
-        c=$(tput cols 2>/dev/null || echo 120)
-    fi
-    [[ -z "${c//[[:space:]]/}" ]] && c=120
-    (( c < 60 )) && c=60
-    echo "$c"
-}
-
-truncate_ellipsis() {
-    # Args: text, width
-    local s="$1"
-    local w="${2:-0}"
-    (( w <= 0 )) && { printf ""; return; }
-    if (( ${#s} <= w )); then
-        printf "%s" "$s"
-        return
-    fi
-    if (( w == 1 )); then
-        printf "…"
-        return
-    fi
-    printf "%s…" "${s:0:w-1}"
-}
-
-pad_right() {
-    # Args: text, width  (no ANSI inside text)
-    local s="$1"
-    local w="${2:-0}"
-    printf "%-*s" "$w" "$s"
-}
-
-# Print table (TAB-separated) with adaptive width and safe truncation
+# Print table with column if available
 print_table() {
-    # If not interactive, keep raw (important for exports)
-    if [[ ! -t 1 ]]; then
+    if need_cmd column; then
+        column -t -s $'\t'
+    else
         cat
-        return 0
     fi
-
-    local term_w
-    term_w=$(term_cols)
-
-    # Expect TAB-separated input
-    awk -v W="$term_w" -v FS='\t' '
-        function len(s){ return length(s) }
-
-        function trunc(s, w,    l) {
-            l = len(s)
-            if (w <= 0) return ""
-            if (l <= w) return s
-            if (w == 1) return "…"
-            return substr(s, 1, w-1) "…"
-        }
-
-        {
-            rowc++
-            for (i=1; i<=NF; i++) {
-                cell[rowc, i] = $i
-                if (len($i) > maxw[i]) maxw[i] = len($i)
-                if (i > colc) colc = i
-            }
-            nfc[rowc] = NF
-        }
-
-        END {
-            if (rowc == 0) exit
-
-            sep = " | "
-            seplen = len(sep)
-
-            for (i=1; i<=colc; i++) {
-                w[i] = maxw[i]
-                if (w[i] > 80) w[i] = 80
-                if (w[i] < 4)  w[i] = 4
-            }
-
-            total = 0
-            for (i=1; i<=colc; i++) total += w[i]
-            total += (colc-1) * seplen
-
-            minw = (W < 80 ? 4 : 6)
-
-            while (total > W) {
-                wi = 1
-                for (i=2; i<=colc; i++) if (w[i] > w[wi]) wi = i
-                if (w[wi] <= minw) break
-                w[wi]--
-                total--
-            }
-
-            for (r=1; r<=rowc; r++) {
-                for (i=1; i<=colc; i++) {
-                    s = cell[r,i]
-                    if (i > nfc[r]) s = ""
-                    s = trunc(s, w[i])
-                    printf "%-*s", w[i], s
-                    if (i < colc) printf "%s", sep
-                }
-                printf "\n"
-            }
-        }
-    '
 }
 
 # ---------- Monitoring ----------
 show_top_databases_by_queries() {
-    print_header "TOP Databases by Active Query Count"
+print_header "TOP Databases by Active Query Count"
 
-    local query="
-    SELECT
-        COALESCE(db, 'NULL') as database_name,
-        COUNT(*) as query_count,
-        SUM(CASE WHEN command='Query' THEN 1 ELSE 0 END) as active_queries,
-        SUM(CASE WHEN command='Sleep' THEN 1 ELSE 0 END) as sleeping,
-        ROUND(AVG(time), 2) as avg_time,
-        MAX(time) as max_time,
-        GROUP_CONCAT(DISTINCT user SEPARATOR ', ') as users
-    FROM information_schema.processlist
-    WHERE user != '${MYSQL_USER}'
-    GROUP BY db
-    ORDER BY active_queries DESC, query_count DESC
-    LIMIT 20;
-    "
+local query="
+SELECT
+    COALESCE(db, 'NULL') as database_name,
+    COUNT(*) as query_count,
+    SUM(CASE WHEN command='Query' THEN 1 ELSE 0 END) as active_queries,
+    SUM(CASE WHEN command='Sleep' THEN 1 ELSE 0 END) as sleeping,
+    ROUND(AVG(time), 2) as avg_time,
+    MAX(time) as max_time,
+    GROUP_CONCAT(DISTINCT user SEPARATOR ', ') as users
+FROM information_schema.processlist
+WHERE user != '${MYSQL_USER}'
+GROUP BY db
+ORDER BY active_queries DESC, query_count DESC
+LIMIT 20;
+"
 
-    echo -e "${BOLD}Database Name | Total | Active | Sleep | Avg(s) | Max(s) | Users${NC}"
-    echo "─────────────────────────────────────────────────────────────────────────────"
+printf "${BOLD}%-25s | %-5s | %-6s | %-5s | %-6s | %-6s | %-30s${NC}\n" \
+    "Database Name" "Total" "Active" "Sleep" "Avg(s)" "Max(s)" "Users"
+echo "─────────────────────────────────────────────────────────────────────────────────────────────────────"
 
-    local cols db_w=25 total_w=5 active_w=6 sleep_w=5 avg_w=6 max_w=6
-    cols=$(term_cols)
+"${MYSQL_CMD[@]}" -e "$query" 2>/dev/null | while IFS=$'\t' read -r db count active sleep avg_t max_t users; do
+    local color
+    if [[ ${active:-0} -gt 50 ]]; then
+        color="${RED}${BOLD}"
+    elif [[ ${active:-0} -gt 20 ]]; then
+        color="${YELLOW}"
+    elif [[ ${active:-0} -gt 5 ]]; then
+        color="${CYAN}"
+    else
+        color="${GREEN}"
+    fi
 
-    # separators: 7 columns -> 6 separators * 3 chars
-    local fixed=$(( db_w + total_w + active_w + sleep_w + avg_w + max_w ))
-    local seps=$(( 6 * 3 ))
-    local users_w=$(( cols - fixed - seps ))
-    (( users_w < 10 )) && users_w=10
+    # Truncate with ...
+    local db_display="$db"
+    [[ ${#db} -gt 25 ]] && db_display="${db:0:22}..."
+    
+    local users_display="$users"
+    [[ ${#users} -gt 30 ]] && users_display="${users:0:27}..."
 
-    "${MYSQL_CMD[@]}" -e "$query" 2>/dev/null | while IFS=$'\t' read -r db count active sleep avg_t max_t users; do
-        local color
-        if [[ ${active:-0} -gt 50 ]]; then
-            color="${RED}${BOLD}"
-        elif [[ ${active:-0} -gt 20 ]]; then
-            color="${YELLOW}"
-        elif [[ ${active:-0} -gt 5 ]]; then
-            color="${CYAN}"
-        else
-            color="${GREEN}"
-        fi
+    printf "${color}%-25s${NC} | %-5s | ${color}%-6s${NC} | %-5s | %-6s | %-6s | %-30s\n" \
+        "$db_display" "${count:-0}" "${active:-0}" "${sleep:-0}" "${avg_t:-0}" "${max_t:-0}" "$users_display"
+done
 
-        db=$(truncate_ellipsis "${db:-NULL}" "$db_w")
-        users=$(truncate_ellipsis "${users:-}" "$users_w")
-
-        printf "%s%s${NC} | %s | %s%s${NC} | %s | %s | %s | %s\n" \
-            "$color" "$(pad_right "$db" "$db_w")" \
-            "$(pad_right "${count:-0}" "$total_w")" \
-            "$color" "$(pad_right "${active:-0}" "$active_w")" \
-            "$(pad_right "${sleep:-0}" "$sleep_w")" \
-            "$(pad_right "${avg_t:-0}" "$avg_w")" \
-            "$(pad_right "${max_t:-0}" "$max_w")" \
-            "$users"
-    done
-
-    echo
-    print_info "Legend: ${RED}Critical (>50)${NC} | ${YELLOW}High (>20)${NC} | ${CYAN}Medium (>5)${NC} | ${GREEN}Normal${NC}"
+echo
+print_info "Legend: ${RED}Critical (>50)${NC} | ${YELLOW}High (>20)${NC} | ${CYAN}Medium (>5)${NC} | ${GREEN}Normal${NC}"
 }
 
 show_databases_with_longest_queries() {
-    print_header "Databases with Longest Running Queries"
+print_header "Databases with Longest Running Queries"
 
-    local query="
-    SELECT
-        COALESCE(db, 'NULL') as database_name,
-        MAX(time) as longest_query,
-        COUNT(*) as total_processes,
-        user,
-        state,
-        LEFT(info, 80) as query_sample
-    FROM information_schema.processlist
-    WHERE command='Query' AND user != '${MYSQL_USER}' AND time > 0
-    GROUP BY db, user, state, info
-    ORDER BY longest_query DESC
-    LIMIT 20;
-    "
+local query="
+SELECT
+    COALESCE(db, 'NULL') as database_name,
+    MAX(time) as longest_query,
+    COUNT(*) as total_processes,
+    user,
+    state,
+    LEFT(info, 80) as query_sample
+FROM information_schema.processlist
+WHERE command='Query' AND user != '${MYSQL_USER}' AND time > 0
+GROUP BY db, user, state, info
+ORDER BY longest_query DESC
+LIMIT 20;
+"
 
-    echo -e "${BOLD}Time(s) | Database | User | State | Query Sample${NC}"
-    echo "─────────────────────────────────────────────────────────────────────────────"
+printf "${BOLD}%-7s | %-20s | %-15s | %-20s | %-50s${NC}\n" \
+    "Time(s)" "Database" "User" "State" "Query Sample"
+echo "───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
 
-    local cols time_w=7 db_w=20 user_w=15 state_w=20
-    cols=$(term_cols)
+"${MYSQL_CMD[@]}" -e "$query" 2>/dev/null | while IFS=$'\t' read -r db time count user state query_text; do
+    local color
+    if [[ ${time:-0} -gt 300 ]]; then
+        color="${RED}${BOLD}"
+    elif [[ ${time:-0} -gt 60 ]]; then
+        color="${YELLOW}"
+    else
+        color="${CYAN}"
+    fi
 
-    # 5 columns -> 4 separators
-    local fixed=$(( time_w + db_w + user_w + state_w ))
-    local seps=$(( 4 * 3 ))
-    local qs_w=$(( cols - fixed - seps ))
-    (( qs_w < 15 )) && qs_w=15
+    # Truncate with ...
+    local db_display="$db"
+    [[ ${#db} -gt 20 ]] && db_display="${db:0:17}..."
+    
+    local user_display="$user"
+    [[ ${#user} -gt 15 ]] && user_display="${user:0:12}..."
+    
+    local state_display="$state"
+    [[ ${#state} -gt 20 ]] && state_display="${state:0:17}..."
+    
+    local query_display="$query_text"
+    [[ ${#query_text} -gt 50 ]] && query_display="${query_text:0:47}..."
 
-    # FIX: correct mapping: db, time, count, user, state, query_text
-    "${MYSQL_CMD[@]}" -e "$query" 2>/dev/null | while IFS=$'\t' read -r db time count user state query_text; do
-        local color
-        if [[ ${time:-0} -gt 300 ]]; then
-            color="${RED}${BOLD}"
-        elif [[ ${time:-0} -gt 60 ]]; then
-            color="${YELLOW}"
-        else
-            color="${CYAN}"
-        fi
+    printf "${color}%-7s${NC} | %-20s | %-15s | %-20s | %-50s\n" \
+        "${time:-0}" "$db_display" "$user_display" "$state_display" "$query_display"
+done
 
-        local t dbv uv sv qv
-        t=$(truncate_ellipsis "${time:-0}" "$time_w")
-        dbv=$(truncate_ellipsis "${db:-NULL}" "$db_w")
-        uv=$(truncate_ellipsis "${user:-}" "$user_w")
-        sv=$(truncate_ellipsis "${state:-}" "$state_w")
-        qv=$(truncate_ellipsis "${query_text:-}" "$qs_w")
-
-        printf "%s%s${NC} | %s | %s | %s | %s\n" \
-            "$color" "$(pad_right "$t" "$time_w")" \
-            "$(pad_right "$dbv" "$db_w")" \
-            "$(pad_right "$uv" "$user_w")" \
-            "$(pad_right "$sv" "$state_w")" \
-            "$qv"
-    done
-
-    echo
-    print_info "Queries running for: ${RED}>300s = Critical${NC} | ${YELLOW}>60s = Warning${NC}"
+echo
+print_info "Queries running for: ${RED}>300s = Critical${NC} | ${YELLOW}>60s = Warning${NC}"
 }
 
 show_databases_by_connections() {
-    print_header "Databases by Connection Count"
+print_header "Databases by Connection Count"
 
-    local query="
-    SELECT
-        COALESCE(db, 'NULL') as database_name,
-        COUNT(DISTINCT id) as total_connections,
-        COUNT(DISTINCT user) as unique_users,
-        SUM(CASE WHEN command='Sleep' THEN 1 ELSE 0 END) as idle_connections,
-        GROUP_CONCAT(DISTINCT host SEPARATOR ', ') as hosts
-    FROM information_schema.processlist
-    WHERE user != '${MYSQL_USER}'
-    GROUP BY db
-    ORDER BY total_connections DESC
-    LIMIT 20;
-    "
+local query="
+SELECT
+    COALESCE(db, 'NULL') as database_name,
+    COUNT(DISTINCT id) as total_connections,
+    COUNT(DISTINCT user) as unique_users,
+    SUM(CASE WHEN command='Sleep' THEN 1 ELSE 0 END) as idle_connections,
+    GROUP_CONCAT(DISTINCT host SEPARATOR ', ') as hosts
+FROM information_schema.processlist
+WHERE user != '${MYSQL_USER}'
+GROUP BY db
+ORDER BY total_connections DESC
+LIMIT 20;
+"
 
-    echo -e "${BOLD}Database | Connections | Users | Idle | Hosts${NC}"
-    echo "─────────────────────────────────────────────────────────────────────────────"
+printf "${BOLD}%-25s | %-11s | %-5s | %-4s | %-40s${NC}\n" \
+    "Database" "Connections" "Users" "Idle" "Hosts"
+echo "────────────────────────────────────────────────────────────────────────────────────────────────"
 
-    local cols db_w=25 conns_w=11 users_w=5 idle_w=4
-    cols=$(term_cols)
+"${MYSQL_CMD[@]}" -e "$query" 2>/dev/null | while IFS=$'\t' read -r db conns users idle hosts; do
+    local color
+    if [[ ${conns:-0} -gt 100 ]]; then
+        color="${RED}${BOLD}"
+    elif [[ ${conns:-0} -gt 50 ]]; then
+        color="${YELLOW}"
+    else
+        color="${GREEN}"
+    fi
 
-    # 5 columns -> 4 separators
-    local fixed=$(( db_w + conns_w + users_w + idle_w ))
-    local seps=$(( 4 * 3 ))
-    local hosts_w=$(( cols - fixed - seps ))
-    (( hosts_w < 15 )) && hosts_w=15
+    # Truncate with ...
+    local db_display="$db"
+    [[ ${#db} -gt 25 ]] && db_display="${db:0:22}..."
+    
+    local hosts_display="$hosts"
+    [[ ${#hosts} -gt 40 ]] && hosts_display="${hosts:0:37}..."
 
-    "${MYSQL_CMD[@]}" -e "$query" 2>/dev/null | while IFS=$'\t' read -r db conns users idle hosts; do
-        local color
-        if [[ ${conns:-0} -gt 100 ]]; then
-            color="${RED}${BOLD}"
-        elif [[ ${conns:-0} -gt 50 ]]; then
-            color="${YELLOW}"
-        else
-            color="${GREEN}"
-        fi
+    printf "${color}%-25s${NC} | ${color}%-11s${NC} | %-5s | %-4s | %-40s\n" \
+        "$db_display" "${conns:-0}" "${users:-0}" "${idle:-0}" "$hosts_display"
+done
 
-        local dbv hv
-        dbv=$(truncate_ellipsis "${db:-NULL}" "$db_w")
-        hv=$(truncate_ellipsis "${hosts:-}" "$hosts_w")
-
-        printf "%s%s${NC} | %s%s${NC} | %s | %s | %s\n" \
-            "$color" "$(pad_right "$dbv" "$db_w")" \
-            "$color" "$(pad_right "${conns:-0}" "$conns_w")" \
-            "$(pad_right "${users:-0}" "$users_w")" \
-            "$(pad_right "${idle:-0}" "$idle_w")" \
-            "$hv"
-    done
-
-    echo
+echo
 }
+
 
 show_database_detailed_stats() {
     read -rp "Enter database name: " dbname
@@ -566,110 +445,122 @@ show_database_detailed_stats() {
 }
 
 show_top_users() {
-    print_header "TOP Users by Resource Usage"
+print_header "TOP Users by Resource Usage"
 
-    local query="
-    SELECT
-        user,
-        COUNT(*) as total_processes,
-        SUM(CASE WHEN command='Query' THEN 1 ELSE 0 END) as active_queries,
-        SUM(CASE WHEN command='Sleep' THEN 1 ELSE 0 END) as sleeping,
-        ROUND(AVG(time), 2) as avg_time,
-        MAX(time) as max_time,
-        COUNT(DISTINCT db) as databases_used
-    FROM information_schema.processlist
-    WHERE user != '${MYSQL_USER}' AND user != 'system user'
-    GROUP BY user
-    ORDER BY active_queries DESC, total_processes DESC
-    LIMIT 15;
-    "
+local query="
+SELECT
+    user,
+    COUNT(*) as total_processes,
+    SUM(CASE WHEN command='Query' THEN 1 ELSE 0 END) as active_queries,
+    SUM(CASE WHEN command='Sleep' THEN 1 ELSE 0 END) as sleeping,
+    ROUND(AVG(time), 2) as avg_time,
+    MAX(time) as max_time,
+    COUNT(DISTINCT db) as databases_used
+FROM information_schema.processlist
+WHERE user != '${MYSQL_USER}' AND user != 'system user'
+GROUP BY user
+ORDER BY active_queries DESC, total_processes DESC
+LIMIT 15;
+"
 
-    echo -e "${BOLD}User | Total | Active | Sleep | Avg(s) | Max(s) | DBs${NC}"
-    echo "─────────────────────────────────────────────────────────────────────────────"
+printf "${BOLD}%-20s | %-5s | %-6s | %-5s | %-6s | %-6s | %-4s${NC}\n" \
+    "User" "Total" "Active" "Sleep" "Avg(s)" "Max(s)" "DBs"
+echo "──────────────────────────────────────────────────────────────────────────────────"
 
-    local cols user_w=20 total_w=5 active_w=6 sleep_w=5 avg_w=6 max_w=6
-    cols=$(term_cols)
+"${MYSQL_CMD[@]}" -e "$query" 2>/dev/null | while IFS=$'\t' read -r user total active sleep avg_t max_t dbs; do
+    local color
+    if [[ ${active:-0} -gt 20 ]]; then
+        color="${RED}${BOLD}"
+    elif [[ ${active:-0} -gt 10 ]]; then
+        color="${YELLOW}"
+    else
+        color="${GREEN}"
+    fi
 
-    # 7 columns -> 6 separators
-    local fixed=$(( user_w + total_w + active_w + sleep_w + avg_w + max_w ))
-    local seps=$(( 6 * 3 ))
-    local dbs_w=$(( cols - fixed - seps ))
-    (( dbs_w < 3 )) && dbs_w=3
-    (( dbs_w > 10 )) && dbs_w=10  # DB count is numeric; keep it sane
+    # Truncate with ...
+    local user_display="$user"
+    [[ ${#user} -gt 20 ]] && user_display="${user:0:17}..."
 
-    "${MYSQL_CMD[@]}" -e "$query" 2>/dev/null | while IFS=$'\t' read -r user total active sleep avg_t max_t dbs; do
-        local color
-        if [[ ${active:-0} -gt 20 ]]; then
-            color="${RED}${BOLD}"
-        elif [[ ${active:-0} -gt 10 ]]; then
-            color="${YELLOW}"
-        else
-            color="${GREEN}"
-        fi
+    printf "${color}%-20s${NC} | %-5s | ${color}%-6s${NC} | %-5s | %-6s | %-6s | %-4s\n" \
+        "$user_display" "${total:-0}" "${active:-0}" "${sleep:-0}" "${avg_t:-0}" "${max_t:-0}" "${dbs:-0}"
+done
 
-        local uv
-        uv=$(truncate_ellipsis "${user:-}" "$user_w")
-
-        printf "%s%s${NC} | %s | %s%s${NC} | %s | %s | %s | %s\n" \
-            "$color" "$(pad_right "$uv" "$user_w")" \
-            "$(pad_right "${total:-0}" "$total_w")" \
-            "$color" "$(pad_right "${active:-0}" "$active_w")" \
-            "$(pad_right "${sleep:-0}" "$sleep_w")" \
-            "$(pad_right "${avg_t:-0}" "$avg_w")" \
-            "$(pad_right "${max_t:-0}" "$max_w")" \
-            "$(pad_right "${dbs:-0}" "$dbs_w")"
-    done
-
-    echo
+echo
 }
 
 realtime_monitor() {
-    local refresh_rate=3
-    read -rp "Refresh interval in seconds [default: 3]: " input_rate
-    if [[ -n "$input_rate" ]]; then
-        if is_uint "$input_rate" && [[ "$input_rate" -ge 1 && "$input_rate" -le 60 ]]; then
-            refresh_rate="$input_rate"
-        else
-            print_warning "Invalid refresh rate, using default (3)."
-        fi
+local refresh_rate=3
+read -rp "Refresh interval in seconds [default: 3]: " input_rate
+if [[ -n "$input_rate" ]]; then
+    if is_uint "$input_rate" && [[ "$input_rate" -ge 1 && "$input_rate" -le 60 ]]; then
+        refresh_rate="$input_rate"
+    else
+        print_warning "Invalid refresh rate, using default (3)."
     fi
+fi
 
-    print_info "Starting real-time monitor (every ${refresh_rate}s). Press Ctrl+C to stop..."
-    sleep 1
+print_info "Starting real-time monitor (every ${refresh_rate}s). Press Ctrl+C to stop..."
+sleep 1
 
-    trap 'echo; print_info "Real-time monitor stopped."; log_action "INFO" "Real-time monitor stopped."; return 0' INT
+trap 'echo; print_info "Real-time monitor stopped."; log_action "INFO" "Real-time monitor stopped."; return 0' INT
 
-    while true; do
-        safe_clear
-        print_header "Real-Time Process Monitor - $(date '+%Y-%m-%d %H:%M:%S')"
+while true; do
+    safe_clear
+    print_header "Real-Time Process Monitor - $(date '+%Y-%m-%d %H:%M:%S')"
 
-        local total_proc active_queries sleeping max_time
-        read -r total_proc active_queries sleeping max_time < <(
-            "${MYSQL_CMD[@]}" -e "
-            SELECT
-                COUNT(*),
-                SUM(CASE WHEN command='Query' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN command='Sleep' THEN 1 ELSE 0 END),
-                MAX(time)
-            FROM information_schema.processlist;
-            " 2>/dev/null | xargs
-        )
-
-        echo -e "${BOLD}Server Summary:${NC} Total: ${total_proc:-0} | Active: ${YELLOW}${active_queries:-0}${NC} | Sleep: ${sleeping:-0} | Max Time: ${RED}${max_time:-0}s${NC}"
-        echo
-
-        echo -e "${BOLD}TOP 10 Active Queries:${NC}"
-        echo "─────────────────────────────────────────────────────────────────────────────"
+    local total_proc active_queries sleeping max_time
+    read -r total_proc active_queries sleeping max_time < <(
         "${MYSQL_CMD[@]}" -e "
-        SELECT id, user, db, time, LEFT(info, 60) as query
-        FROM information_schema.processlist
-        WHERE command='Query' AND user != '${MYSQL_USER}'
-        ORDER BY time DESC
-        LIMIT 10;
-        " 2>/dev/null | print_table
+        SELECT
+            COUNT(*),
+            SUM(CASE WHEN command='Query' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN command='Sleep' THEN 1 ELSE 0 END),
+            MAX(time)
+        FROM information_schema.processlist;
+        " 2>/dev/null | xargs
+    )
 
-        sleep "$refresh_rate"
+    echo -e "${BOLD}Server Summary:${NC} Total: ${total_proc:-0} | Active: ${YELLOW}${active_queries:-0}${NC} | Sleep: ${sleeping:-0} | Max Time: ${RED}${max_time:-0}s${NC}"
+    echo
+
+    echo -e "${BOLD}TOP 10 Active Queries:${NC}"
+    printf "${BOLD}%-8s | %-15s | %-20s | %-8s | %-60s${NC}\n" \
+        "ID" "User" "Database" "Time(s)" "Query"
+    echo "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
+    
+    "${MYSQL_CMD[@]}" -e "
+    SELECT id, user, COALESCE(db, 'NULL'), time, COALESCE(LEFT(info, 60), 'NULL')
+    FROM information_schema.processlist
+    WHERE command='Query' 
+      AND user != '${MYSQL_USER}'
+      AND id != CONNECTION_ID()
+      AND info NOT LIKE '%FROM information_schema.processlist%'
+    ORDER BY time DESC
+    LIMIT 10;
+    " 2>/dev/null | while IFS=$'\t' read -r id user db time query; do
+        local color="${GREEN}"
+        if [[ ${time:-0} -gt 60 ]]; then
+            color="${RED}${BOLD}"
+        elif [[ ${time:-0} -gt 30 ]]; then
+            color="${YELLOW}"
+        fi
+        
+        # Truncate with ...
+        local user_display="$user"
+        [[ ${#user} -gt 15 ]] && user_display="${user:0:12}..."
+        
+        local db_display="$db"
+        [[ ${#db} -gt 20 ]] && db_display="${db:0:17}..."
+        
+        local query_display="$query"
+        [[ ${#query} -gt 60 ]] && query_display="${query:0:57}..."
+        
+        printf "${color}%-8s${NC} | %-15s | %-20s | ${color}%-8s${NC} | %-60s\n" \
+            "${id:-0}" "$user_display" "$db_display" "${time:-0}" "$query_display"
     done
+
+    sleep "$refresh_rate"
+done
 }
 
 show_server_summary() {
