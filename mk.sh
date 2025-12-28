@@ -97,11 +97,18 @@ trap cleanup EXIT
 
 detect_panel() {
     local panel="unknown"
+    
     if [[ -f /usr/local/cpanel/cpanel ]] || [[ -d /var/cpanel ]] || [[ -f /etc/cpanel/cpanel.config ]]; then
         panel="cpanel"
     elif [[ -f /usr/local/directadmin/directadmin ]] || [[ -f /usr/local/directadmin/conf/mysql.conf ]]; then
         panel="directadmin"
+    elif command -v bt &>/dev/null; then
+        # Check if 'bt' command exists and works (aaPanel signature)
+        if bt default &>/dev/null || [[ -d /www/server/panel ]]; then
+            panel="aapanel"
+        fi
     fi
+    
     echo "$panel"
 }
 
@@ -167,7 +174,52 @@ setup_da_mysql() {
     return 0
 }
     
+setup_aapanel_mysql() {
+    MYSQL_CNF="/etc/my.cnf"
+    
+    if [[ ! -f "$MYSQL_CNF" ]]; then
+        print_error "aaPanel MySQL credentials file not found: $MYSQL_CNF"
+        return 1
+    fi
 
+    # Tight perms (best practice)
+    chmod 600 "$MYSQL_CNF" 2>/dev/null || true
+
+    MYSQL_USER="root"
+
+    # IMPORTANT: defaults-file must be first after mysql
+    MYSQL_CMD=(mysql --defaults-file="$MYSQL_CNF" --batch --skip-column-names)
+
+    # Test connection
+    if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
+        # Fallback to defaults-extra-file
+        MYSQL_CMD=(mysql --defaults-extra-file="$MYSQL_CNF" --batch --skip-column-names)
+        if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
+            # Connection failed - ask user for password
+            print_warning "Failed to connect to MySQL with aaPanel credentials file: $MYSQL_CNF"
+            print_warning "Please enter MySQL root password manually:"
+            
+            read -s -p "MySQL root password: " mysql_pass
+            echo ""
+            
+            if [[ -z "$mysql_pass" ]]; then
+                print_error "Password cannot be empty."
+                return 1
+            fi
+            
+            # Test with provided password
+            MYSQL_CMD=(mysql -u root -p"$mysql_pass" --batch --skip-column-names)
+            if ! "${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1; then
+                print_error "Failed to connect to MySQL with provided password."
+                return 1
+            fi
+            
+            print_success "Successfully connected to MySQL with provided credentials."
+        fi
+    fi
+
+    return 0
+}
 # ---------- UI ----------
 show_menu() {
     safe_clear
@@ -981,8 +1033,8 @@ main() {
     PANEL=$(detect_panel)
 
     if [[ "$PANEL" == "unknown" ]]; then
-        print_error "Could not detect cPanel or DirectAdmin."
-        print_info "Please ensure the server has cPanel or DirectAdmin installed."
+        print_error "Could not detect cPanel, DirectAdmin, or aaPanel."
+        print_info "Please ensure the server has one of these control panels installed."
         log_action "ERROR" "Panel detection failed"
         exit 1
     fi
@@ -994,6 +1046,8 @@ main() {
         setup_cpanel_mysql || exit 2
     elif [[ "$PANEL" == "directadmin" ]]; then
         setup_da_mysql || exit 2
+    elif [[ "$PANEL" == "aapanel" ]]; then
+        setup_aapanel_mysql || exit 2
     fi
 
     print_success "MySQL connection configured (User: $MYSQL_USER)"
