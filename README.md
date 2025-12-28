@@ -40,7 +40,7 @@ It helps you quickly identify:
 
 ## ✅ Supported Environments
 
-- **Panels:** cPanel, DirectAdmin  
+- **Panels:** cPanel, DirectAdmin , aapanel
 - **Database:** MySQL / MariaDB  
 - **Shell:** Bash  
 - **Run as:** root (recommended)
